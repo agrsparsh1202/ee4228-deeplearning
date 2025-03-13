@@ -116,10 +116,13 @@ if __name__ == "__main__":
     print(f"Test Accuracy: {test_acc:.2f}")
     
     # Save components
-    with open("face_model.pkl", "wb") as f:
-        pickle.dump({
-            'model': knn,
-            'normalizer': normalizer,
-            'class_names': sorted(np.unique(y_train))
-        }, f)
-    print("Model saved successfully.")
+    try:
+        with open("face_model.pkl", "wb") as f:
+            pickle.dump({
+                'model': knn,
+                'normalizer': normalizer,
+                'class_names': sorted(np.unique(y_train))
+            }, f)
+        print("Model saved successfully.")
+    except Exception as e:
+        print(f"Error saving model: {e}")

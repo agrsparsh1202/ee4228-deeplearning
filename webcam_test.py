@@ -33,6 +33,9 @@ def recognize_face(face):
     except FileNotFoundError:
         print("Trained model not found. Please run the training script first.")
         return "Unknown"
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        return "Unknown"
     
     embedding = encode_face(face)
     embedding = normalizer.transform([embedding])
