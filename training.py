@@ -1,125 +1,143 @@
 import os
-import cv2
 import pickle
 import numpy as np
 import torch
 from PIL import Image
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.preprocessing import Normalizer
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
+from torch.utils.data import DataLoader, Dataset
 from facenet_pytorch import InceptionResnetV1, MTCNN
 import torchvision.transforms as transforms
+import torch.nn as nn
+import torch.optim as optim
 
-# Initialize models with improved parameters
-facenet = InceptionResnetV1(pretrained='casia-webface').eval()  # Better for face recognition
-detector = MTCNN(
-    image_size=160,
-    margin=40,  # Increased margin for better context
-    keep_all=False,
-    thresholds=[0.6, 0.7, 0.7],  # Lower detection thresholds
-    min_face_size=40,
-    device='cuda' if torch.cuda.is_available() else 'cpu'
-)
+# Initialize FaceNet model (for embeddings)
+facenet = InceptionResnetV1(pretrained='vggface2').eval()
+mtcnn = MTCNN(image_size=160, margin=40, keep_all=False, thresholds=[0.6, 0.7, 0.7], min_face_size=40, 
+              device='cuda' if torch.cuda.is_available() else 'cpu')
 
-# Enhanced augmentations using torchvision (for training images)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Define Transformations
 train_transform = transforms.Compose([
     transforms.ToPILImage(),
     transforms.RandomHorizontalFlip(p=0.5),
     transforms.RandomRotation(15),
     transforms.ColorJitter(0.2, 0.2, 0.2, 0.1),
     transforms.RandomResizedCrop(160, scale=(0.9, 1.1)),
-    transforms.RandomAffine(0, translate=(0.1, 0.1)),
     transforms.ToTensor(),
     transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
 ])
 
-# Deterministic transform for test images (without randomness)
-test_transform = transforms.Compose([
-    transforms.ToPILImage(),
-    transforms.ToTensor(),
-    transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
-])
+# Dataset Class
+class FaceDataset(Dataset):
+    def __init__(self, image_paths, labels, transform=None):
+        self.image_paths = image_paths
+        self.labels = labels
+        self.transform = transform
+    
+    def __len__(self):
+        return len(self.image_paths)
+    
+    def __getitem__(self, idx):
+        img_path = self.image_paths[idx]
+        label = self.labels[idx]
+        img = Image.open(img_path).convert('RGB')
+        face = mtcnn(img)
 
-def get_embedding(face_tensor):
-    # face_tensor is expected to be of shape (3, 160, 160)
-    with torch.no_grad():
-        # Add batch dimension inside the function
-        return facenet(face_tensor.unsqueeze(0)).squeeze().numpy()
+        if face is None:
+            return None
+        
+        face_np = (face.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+        if self.transform:
+            face_tensor = self.transform(face_np)
+        else:
+            face_tensor = transforms.ToTensor()(face_np)
+        
+        return face_tensor, label
 
-def process_dataset(dataset_path, test_size=0.2):
-    X_train, X_test, y_train, y_test = [], [], [], []
+# Load Dataset
+def load_dataset(dataset_path, test_size=0.3):
+    image_paths, labels = [], []
     class_names = sorted(os.listdir(dataset_path))
     
-    for label_idx, class_name in enumerate(class_names):
+    for class_name in class_names:
         class_dir = os.path.join(dataset_path, class_name)
         if not os.path.isdir(class_dir):
             continue
-            
-        images = [os.path.join(class_dir, f) for f in os.listdir(class_dir) 
-                 if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
         
-        # Stratified split maintaining class balance
-        train_files, test_files = train_test_split(images, test_size=test_size, random_state=42)
-        
-        # Process training images with augmentation
-        for path in train_files:
-            img = Image.open(path).convert('RGB')
-            face = detector(img)
-            if face is None:
-                continue
-            # Convert detected face (tensor shape: [3,160,160] with values in [0,1])
-            # Multiply by 255 and convert to uint8 to mimic standard image format
-            face_np = (face.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-            
-            # Generate multiple augmented versions
-            for _ in range(10):
-                augmented = train_transform(face_np)  # Returns tensor of shape (3,160,160)
-                embedding = get_embedding(augmented)
-                X_train.append(embedding)
-                y_train.append(class_name)
-        
-        # Process test images without augmentation
-        for path in test_files:
-            img = Image.open(path).convert('RGB')
-            face = detector(img)
-            if face is None:
-                continue
-            # Process similar to training: convert tensor to np.uint8 image
-            face_np = (face.permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-            # Apply the deterministic test transform
-            face_tensor = test_transform(face_np)  # shape: (3,160,160)
-            embedding = get_embedding(face_tensor)  # get_embedding adds the needed batch dim internally
-            X_test.append(embedding)
-            y_test.append(class_name)
+        for file in os.listdir(class_dir):
+            if file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                image_paths.append(os.path.join(class_dir, file))
+                labels.append(class_name)
+    
+    train_images, test_images, train_labels, test_labels = train_test_split(
+        image_paths, labels, test_size=test_size, random_state=42, stratify=labels)
+    
+    return train_images, train_labels, test_images, test_labels, class_names
 
-    return np.array(X_train), np.array(y_train), np.array(X_test), np.array(y_test)
+# Define FaceClassifier Model
+class FaceClassifier(nn.Module):
+    def __init__(self, embedding_dim, num_classes):
+        super(FaceClassifier, self).__init__()
+        self.fc1 = nn.Linear(embedding_dim, 256)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(256, num_classes)
+        self.softmax = nn.Softmax(dim=1)
+    
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.fc2(x)
+        return self.softmax(x)
 
 if __name__ == "__main__":
-    dataset_path = "dataset"  # Update this to your dataset folder
-    X_train, y_train, X_test, y_test = process_dataset(dataset_path)
+    dataset_path = "dataset"  # Ensure dataset folder exists
+    train_images, train_labels, test_images, test_labels, class_names = load_dataset(dataset_path)
     
-    # Normalize embeddings
-    normalizer = Normalizer(norm='l2')
-    X_train = normalizer.transform(X_train)
-    X_test = normalizer.transform(X_test)
-    
-    # KNN Classifier typically works better with few samples
-    knn = KNeighborsClassifier(n_neighbors=1, metric='cosine')
-    knn.fit(X_train, y_train)
-    
-    # Evaluate
-    train_acc = accuracy_score(y_train, knn.predict(X_train))
-    test_acc = accuracy_score(y_test, knn.predict(X_test))
-    
-    print(f"Training Accuracy: {train_acc:.2f}")
-    print(f"Test Accuracy: {test_acc:.2f}")
-    
-    # Save components
+    # Create Dataset Loaders
+    train_dataset = FaceDataset(train_images, train_labels, transform=train_transform)
+    train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=4)
+
+    num_classes = len(class_names)
+    label_map = {label: idx for idx, label in enumerate(class_names)}
+
+    # Initialize Model
+    model = FaceClassifier(embedding_dim=512, num_classes=num_classes).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    criterion = nn.CrossEntropyLoss()
+
+    # Training Loop
+    num_epochs = 20
+    for epoch in range(num_epochs):
+        model.train()
+        total_loss = 0
+        correct, total = 0, 0
+        
+        for images, labels in train_loader:
+            if images is None:
+                continue
+            
+            images = images.to(device)
+            labels = torch.tensor([label_map[label] for label in labels]).to(device)
+            
+            with torch.no_grad():
+                embeddings = facenet(images).to(device)
+            
+            outputs = model(embeddings)
+            loss = criterion(outputs, labels)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            total_loss += loss.item()
+            correct += (outputs.argmax(dim=1) == labels).sum().item()
+            total += labels.size(0)
+        
+        print(f"Epoch {epoch+1}/{num_epochs}, Loss: {total_loss/total:.4f}, Accuracy: {correct/total:.2f}")
+
+    # Save Model
     with open("face_model.pkl", "wb") as f:
-        pickle.dump({
-            'model': knn,
-            'normalizer': normalizer,
-            'class_names': sorted(np.unique(y_train))
-        }, f)
-    print("Model saved successfully.")
+        pickle.dump({'model': model.state_dict(), 'class_names': class_names}, f)
+    
+    print("Model trained and saved successfully.")
