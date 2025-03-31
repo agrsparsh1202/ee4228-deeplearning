@@ -4,14 +4,14 @@ import pickle
 import numpy as np
 import torch
 from PIL import Image
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import Normalizer
-from sklearn.metrics import accuracy_score, classification_report
-from torch.utils.data import DataLoader, Dataset
+#from sklearn.model_selection import train_test_split
+#from sklearn.preprocessing import Normalizer
+#from sklearn.metrics import accuracy_score, classification_report
+#from torch.utils.data import DataLoader, Dataset
 from facenet_pytorch import InceptionResnetV1, MTCNN
 import torchvision.transforms as transforms
 import torch.nn as nn
-import torch.optim as optim
+#import torch.optim as optim
 
 # Initialize FaceNet model
 facenet = InceptionResnetV1(pretrained='vggface2').eval()
@@ -126,4 +126,3 @@ def run_webcam(model_path="face_model.pkl"):
 
 if __name__ == "__main__":
     run_webcam()
-
